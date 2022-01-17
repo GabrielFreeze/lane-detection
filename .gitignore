@@ -6,6 +6,7 @@ __pycache__/
 
 # Don't upload training videos
 *.mp4
+*.avi
 
 
 # C extensions
