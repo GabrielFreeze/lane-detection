@@ -314,6 +314,7 @@ cv2.createTrackbar('X-Scale',          'Hyper Parameters', 45, 100,  lambda x: N
 
 
 
+
 while cap.isOpened():
 
 
