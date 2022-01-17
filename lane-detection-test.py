@@ -2,17 +2,15 @@ import numpy as np
 import cv2
 import os
 import math
+import time
 from matplotlib import pyplot as plt
 import copy
-dir_path = os.path.dirname(os.path.realpath(__file__))
+dir_path = os.path.dirname(os.path.realpath(__file__))+'/'
 
 class Lane:
-    def __init__(self,width,height):
+    def __init__(self, width, height, x_scl=0.4, y_scl=0.55):
         self.width = width
         self.height = height
-
-        x_scl = 0.40
-        y_scl = 0.55
 
         a = (0.00*self.width,      1.00*self.height)
         b = (x_scl*self.width,     y_scl*self.height)
@@ -26,7 +24,7 @@ class Lane:
 
         self.xm_in_px = 3.675 / 85 #Lane width (12 ft in m) is ~85 px on image
         self.ym_in_px = 3.048 / 24 #Dashed line length (10 ft in m) is ~24 px on image
-        self.MAX_RADIUS = 10000    #Largest possible lane curve radius
+        self.MAX_RADIUS = float('inf')    #Largest possible lane curve radius
         self.EQUID_POINTS = 25     #Number of points to use for the equidistant approximation
         self.DEV_POL = 2   #Max mean squared error of the approximation
         self.MSE_DEV = 1.1 #Minimum mean squared error ratio to consider higher order of the polynomial
@@ -36,7 +34,14 @@ class Lane:
         self.RANGE = 0.0 # Fraction of the image to skip
 
         self.M, self.Minv = self.create_m()
+    
+    def set_roi(self, x_scl, y_scl):
+        a = (0.00*self.width,      1.00*self.height)
+        b = (x_scl*self.width,     y_scl*self.height)
+        c = ((1-x_scl)*self.width, y_scl*self.height)
+        d = (1.00*self.width,      1.00*self.height)
 
+        self.mask_vertices = np.array([[a,b,c,d]], dtype=np.int32) 
 
     def set_gray(self, img):
        return cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) 
@@ -72,6 +77,7 @@ class Lane:
             returns 2 Lists of coordinates (x,y) for the points of the top and bottom lane lines, respectively
         '''
         try:
+            pts = np.where(edges != [0])
                                 #y    ,    x
             pts_zip = list(zip(-pts[0],pts[1]))
             top_mostY = max(-pts[0])
@@ -125,7 +131,7 @@ class Lane:
         '''
         
         #Fit a quadratic polynomial curve
-        return np.polyfit(top_ptsXf, top_ptsYf, order)
+        return np.polyfit([x for (x,_) in pts], [y for (_,y) in pts], order)
     
     def draw_curve(self, img, pol, pts):
         '''
@@ -142,12 +148,10 @@ class Lane:
 
         return cv2.polylines(img, [pts], False, (0,0,255),3)
 
-
     #Returns saturation channel of img
     def s_hls(self, img):
         hls = cv2.cvtColor(img, cv2.COLOR_BGR2HLS)
         return hls[:,:,2]
-
     # Sharpen image
     def sharpen_img(self, img):
         gb = cv2.GaussianBlur(img, (5,5), 20.0)
@@ -238,27 +242,27 @@ class Lane:
             return self.MAX_RADIUS
         else:
             y_pol = np.linspace(0, 1, num=self.EQUID_POINTS)
-            x_pol = self.pol_calc(pol, y_pol)*self.xm_in_px
-            y_pol = y_pol*self.height*self.ym_in_px
+            x_pol = self.pol_calc(pol, y_pol)
+            y_pol = y_pol*self.height
             pol = np.polyfit(y_pol, x_pol, len(pol)-1)
             d_y = self.pol_d(pol, y)
             dd_y = self.pol_dd(pol, y)
             r = ((np.sqrt(1+d_y**2))**3)/abs(dd_y)
             if r > self.MAX_RADIUS:
                 r = self.MAX_RADIUS
-            return r
+            return r,(dd_y > 0)
     
     # Calculate radius of curvature of a lane by avaraging lines curvatures
     def lane_curv(self, left, right):
-        l = self.r_curv(left, 1.0)
-        r = self.r_curv(right, 1.0)
+        l,dir_l = self.r_curv(left, 1.0)
+        r,dir_r = self.r_curv(right, 1.0)
         if l < self.MAX_RADIUS and r < self.MAX_RADIUS:
-            return (self.r_curv(left, 1.0)+self.r_curv(right, 1.0))/2.0
+            return (l+r)/2.0, (dir_l and dir_r)
         else:
             if l < self.MAX_RADIUS:
-                return l
+                return l, False
             if r < self.MAX_RADIUS:
-                return r
+                return r, False
             return self.MAX_RADIUS
 
     def mean_squared_error(self,true,pred):
@@ -292,35 +296,42 @@ class Lane:
         return np.polyfit(y, x_new, new_ord)
 
 
-# frame_org = cv2.imread(dir_path+"/lane2.png")
+def show_image(name, img, size=0.5):
+    cv2.imshow(name,cv2.resize(img,(int(img.shape[1]*size),int(img.shape[0]*size))))
 
 
-cv2.namedWindow('Binary Threshold')
-cv2.createTrackbar('Binary Threshold', 'Binary Threshold', 226, 255, lambda x: None)
 
-cv2.namedWindow('Canny Threshold')
-cv2.createTrackbar('Canny Threshold', 'Canny Threshold', 50, 200, lambda x: None)
-
-
-cap = cv2.VideoCapture(dir_path+"/lane-test5.mp4")
+cap = cv2.VideoCapture(dir_path+"lane-test.mp4")
 _,frame_org = cap.read()
 lane = Lane(frame_org.shape[1], frame_org.shape[0])
+
+
+cv2.namedWindow('Hyper Parameters')
+cv2.createTrackbar('Binary Threshold', 'Hyper Parameters', 195, 255, lambda x: None)
+cv2.createTrackbar('Canny Threshold',  'Hyper Parameters', 50, 200,  lambda x: None)
+cv2.createTrackbar('Y-Scale',          'Hyper Parameters', 60, 100,  lambda x: None)
+cv2.createTrackbar('X-Scale',          'Hyper Parameters', 45, 100,  lambda x: None)
+
+
+
 while cap.isOpened():
 
+
+    lane.set_roi(cv2.getTrackbarPos('X-Scale','Hyper Parameters')/100,cv2.getTrackbarPos('Y-Scale','Hyper Parameters')/100)
+
     _,frame_org = cap.read()
-    frame = cv2.cvtColor(frame_org, cv2.COLOR_RGB2GRAY)
-    frame = cv2.equalizeHist(frame)
-    
-    # _,frame = cv2.threshold(frame,195,255,cv2.THRESH_BINARY)
-    _,frame = cv2.threshold(frame,cv2.getTrackbarPos('Binary Threshold','Binary Threshold'),255,cv2.THRESH_BINARY)
+    show_image('Original Frame',lane.get_roi(frame_org))
+
+    frame = lane.set_gray(frame_org)
+    frame = lane.eq_hist(frame)
+
+    frame = lane.bin_thresh(frame,param1=cv2.getTrackbarPos('Binary Threshold','Hyper Parameters'),param2=255)
 
     warped_frame = lane.get_roi(frame)
     warped_frame = lane.transform(warped_frame,lane.M)
+    show_image('Warped Frame',warped_frame)
 
-    # canny_edges = cv2.Canny(warped_frame, 50,200, 1)
-    canny_edges = cv2.Canny(warped_frame, cv2.getTrackbarPos('Canny Threshold','Canny Threshold'),200, 1)
-    # cv2.imshow('!',canny_edges)
-
+    canny_edges = lane.canny_edge(warped_frame, param1=cv2.getTrackbarPos('Canny Threshold','Hyper Parameters'), param2=200)
     frame2 = frame_org.copy()
     frame2 = lane.transform(frame2, lane.M)
     frame2 = cv2.rotate(frame2,cv2.ROTATE_90_CLOCKWISE)
@@ -328,99 +339,31 @@ while cap.isOpened():
     #Rotate Image
     rotated_canny_edges = cv2.rotate(canny_edges, cv2.ROTATE_90_CLOCKWISE)
     
-    pts = np.where(rotated_canny_edges != [0])
+    left,right = lane.get_lanes(rotated_canny_edges)
+    left_curve,right_curve = [],[]
     
     try:
-                    #y,x
-        pts_zip = list(zip(-pts[0],pts[1]))
-        top_mostY = max(-pts[0])
-        bottom_mostY = min(-pts[0])
+        if left and (left_f := lane.filter_points(left)):
+            left_curve = lane.fit_curve(left_f)
+            frame2 = lane.draw_curve(frame2, left_curve,  left_f)
 
-        #Calculate horizontal line that seperates right and left lane
-        midY = (top_mostY + bottom_mostY)/2
-        print(top_mostY+rotated_canny_edges.shape[0],bottom_mostY+rotated_canny_edges.shape[0],midY+rotated_canny_edges.shape[0])
-
-        top_ptsX = []
-        top_ptsY = []
-
-        bottom_ptsX = []
-        bottom_ptsY = []
+        if right and (right_f := lane.filter_points(right)):
+            right_curve = lane.fit_curve(right_f)
+            frame2 = lane.draw_curve(frame2, right_curve, right_f)
         
-        #Put points in the correct array
-        for y,x in pts_zip:
-            if y > midY:
-                top_ptsX.append(x)
-                top_ptsY.append(y+rotated_canny_edges.shape[0])
-            else:
-                bottom_ptsX.append(x)
-                bottom_ptsY.append(y+rotated_canny_edges.shape[0])
+        if int(time.time()*32) % 2 == 0:
+            x,dir = lane.lane_curv(left_curve, right_curve)
+            if x/100000000 < 100:
+                print(x/100000000,['RIGHT','LEFT'][dir])
+            else: print('Straight')
+            
 
-        #Filter top lines to remove outlier points (noise)
-        mean = np.mean(top_ptsY)
-        std = np.std(top_ptsY)
-        top_ptsXf = []
-        top_ptsYf = []
-
-        for i,y in enumerate(top_ptsY):
-            if abs((y-mean)/std) < 1.6:
-                top_ptsXf.append(top_ptsX[i])
-                top_ptsYf.append(y)
-        
-
-        #Filter bottom lines to remove outlier points (noise)
-        mean = np.mean(bottom_ptsY)
-        std = np.std(bottom_ptsY)
-        bottom_ptsXf = []
-        bottom_ptsYf = []
-
-        for i,y in enumerate(bottom_ptsY):
-            if abs((y-mean)/std) < 1.6:
-                bottom_ptsXf.append(bottom_ptsX[i])
-                bottom_ptsYf.append(y)
-
-
-
-        #Fit a quadratic polynomial curve
-        zl = np.polyfit(top_ptsXf, top_ptsYf, 2)
-        fl = np.poly1d(zl)
-
-        zr = np.polyfit(bottom_ptsXf, bottom_ptsYf, 2)
-        fr = np.poly1d(zr)
-
-
-
-        # fig, axs = plt.subplots(2)
-        # axs[0].scatter(top_ptsXf,top_ptsYf)
-        # plt.ylim([min(top_ptsYf),max(top_ptsYf)])
-        # t = np.arange(min(top_ptsXf),max(top_ptsXf),1)
-        # axs[1].plot(t,fl(t))
-        # plt.show()
-
-        # fig, axs = plt.subplots(2)
-        # axs[0].scatter(bottom_ptsXf,bottom_ptsYf)
-        # plt.ylim([min(bottom_ptsYf),max(bottom_ptsYf)])
-        # t = np.arange(min(bottom_ptsXf),max(bottom_ptsXf),1)
-        # axs[1].plot(t,fr(t))
-        # plt.show()
-
-        #Plot curve on lane video
-        x = np.arange(min(top_ptsXf),max(top_ptsXf),1)
-        y_org = np.polyval(zl,x)
-        y = [rotated_canny_edges.shape[0]-i for i in y_org]
-        pts = np.array(list(zip(x,y)), np.int32)
-        cv2.polylines(frame2, [pts], False, (0,0,255),3)
-
-        #Plot curve on lane video
-        x = np.arange(min(bottom_ptsXf),max(bottom_ptsXf),1)
-        y_org = np.polyval(zr,x)
-        y = [rotated_canny_edges.shape[0]-i for i in y_org]
-        pts = np.array(list(zip(x,y)), np.int32)
-        cv2.polylines(frame2, [pts], False, (0,0,255),3)
-    except Exception as e:  print("Could not perform lane detection"+str(e))
+    except Exception as e: print(str(e))
+    
 
     #Show frame
     frame2 = cv2.rotate(frame2,cv2.ROTATE_90_COUNTERCLOCKWISE)
-    cv2.imshow('frame2',frame2)
+    show_image('Output Frame',frame2)
 
     
     if cv2.waitKey(1) & 0xFF == ord('q'): 
@@ -430,19 +373,21 @@ while cap.isOpened():
 
 
 
-    # fig, axs = plt.subplots(2)
-    # axs[0].scatter(top_ptsX,top_ptsY)
-    # t = np.arange(min(top_ptsX),max(top_ptsX),1)
-    # axs[1].plot(t,fl(t))
-
-    # plt.show()
 
 
-    
+# fig, axs = plt.subplots(2)
+# axs[0].scatter(top_ptsX,top_ptsY)
+# t = np.arange(min(top_ptsX),max(top_ptsX),1)
+# axs[1].plot(t,fl(t))
+
+# plt.show()
 
 
-    # frame2 = lane.transform(frame2, lane.Minv)
-    # cv2.imshow('canny_edges', frame2)
+
+
+
+# frame2 = lane.transform(frame2, lane.Minv)
+# cv2.imshow('canny_edges', frame2)
 
         
 
@@ -457,14 +402,6 @@ while cap.isOpened():
 # t = np.arange(0, canny_edges.shape[1], 1)
 # plt.plot(t,f(t))
 # plt.show()
-
-
-
-
-
-
-
-
 
 
 
