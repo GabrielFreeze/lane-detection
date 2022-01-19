@@ -23,17 +23,12 @@ class Lane:
         self.wrp_x2 = self.width/2 + self.width/10
 
 
-        self.min_lane_points = 175 #Minimum Number of Points a detected lane line should contain.
-                                    #Less than that, then it is considered noise.
-
-        self.MAX_RADIUS = float('inf')    #Largest possible lane curve radius
-        self.EQUID_POINTS = 25     #Number of points to use for the equidistant approximation
-        self.DEV_POL = 2   #Max mean squared error of the approximation
-        self.MSE_DEV = 1.1 #Minimum mean squared error ratio to consider higher order of the polynomial
-        self.WINDOW_SIZE = 15 # Half of the sensor span
-        self.DEV = 7 # Maximum of the point deviation from the sensor center
-        self.SPEED = 2 / self.height # Pixels shift per frame
-        self.RANGE = 0.0 # Fraction of the image to skip
+        self.min_lane_pts = 175         #Minimum Number of Points a detected lane line should contain.
+                                        #Less than that, then it is considered noise.
+        self.shift = 20                 #The estimated distance in px between the 2 lanes. Used for lane inference
+        self.MAX_RADIUS = float('inf')  #Largest possible lane curve radius
+        self.EQUID_POINTS = 25          #Number of points to use for the equidistant approximation
+        self.DEV = 7                    # Maximum of the point deviation from the sensor center
 
         self.M, self.Minv = self.create_m()
     
@@ -45,8 +40,14 @@ class Lane:
 
         self.mask_vertices = np.array([[a,b,c,d]], dtype=np.int32) 
 
+    def set_min_lane_pts(self, x):
+        self.min_lane_pts = x;
+
     def set_gray(self, img):
        return cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) 
+
+    def set_shift(self,x):
+        self.shift = x
 
     def get_roi(self, img):
         
@@ -106,10 +107,10 @@ class Lane:
                     bottom_ptsX.append(x)
                     bottom_ptsY.append(y+edges.shape[0])
             
-            if len(top_ptsX) > self.min_lane_points:
+            if len(top_ptsX) > self.min_lane_pts:
                 top = list(zip(top_ptsX,top_ptsY))
 
-            if len(bottom_ptsY) > self.min_lane_points:
+            if len(bottom_ptsY) > self.min_lane_pts:
                 bottom = list(zip(bottom_ptsX,bottom_ptsY))
 
 
@@ -125,8 +126,13 @@ class Lane:
         '''
         pts: A list of coordinates (x,y)
         dev: The maximum deviation the filtered points should have
-        returns a subset of pts such that any point's y coordinate's standard deviation does not exceed dev
+        
+        returns a subset of pts such that any point's y coordinate's standard deviation that is not considered noise.
         '''
+
+        #If there aren't enough points, treat the detected points as noise.
+        if len(pts) < self.min_lane_pts:
+            return []
 
         #Filter top lines to remove outlier points (noise)
         pts_y = [y for (x,y) in pts]
@@ -157,7 +163,7 @@ class Lane:
         y = [rotated_canny_edges.shape[0]-i for i in y_org]
         pts = np.array(list(zip(x,y)), np.int32)
 
-        return cv2.polylines(img, [pts], False, (0,0,255),3)
+        return cv2.polylines(img, [pts], False, (0,0,255),10)
 
     def infer_lane(self, pol, pts, other_lane):
         '''
@@ -172,13 +178,13 @@ class Lane:
         y_coords = [y for (_,y) in pts]
         avg_y = sum(y_coords)/len(pts)
         
-        shift = self.width/2 - avg_y if other_lane else avg_y - self.width/2
-
+        # shift = self.width/2 - avg_y if other_lane else avg_y - self.width/2
+        shift = -self.shift if other_lane else self.shift
         #Quadratic Curve
         if len(pol) == 3:
             new_pol[0] = pol[0]
             new_pol[1] = pol[1]      
-            new_pol[2] = pol[2]+shift+shift #Move curve up/left if other_lane lane is false (Left) or down/right if other_lane is true (left)
+            new_pol[2] = pol[2]+shift #Move curve up/left if other_lane lane is false (Left) or down/right if other_lane is true (left)
         
         #Generate new points
         f = np.poly1d(pol)
@@ -187,6 +193,61 @@ class Lane:
 
         return new_pts,new_pol
     
+    def _infer_lane(self, pol, k, other_lane):
+        assert(len(pol) == 3)
+        a = pol[0]
+        b = pol[1]
+        c = pol[2]
+
+        x = (-b)/(2*a)              # x Coordinate of Turning Point of pol
+        y = self.pol_calc(pol,x)    # y Coordinate of Turning Point of pol
+
+        r = (math.sqrt(1 + 4*(a**2)*(x**2) + 4*a*b*x + b**2 )**3)/(2*a) # Radius of curvature at Turning Point
+
+        p = a > 0 #True: Curve is ∪ shaped. False: Curve is ∩ shaped.
+
+        y_center = y+r if p else y-r #Center of circle
+
+        y_center_new = (y_center)-r*k if p else (y_center)+r*k #Center of scaled circle
+
+        r_new = r - r*k  #Radius of scaled circle
+
+        #Find y-point on new circle at x, ±2. 
+        y2 = y_center_new + r_new
+
+        #Find Quadratic Curve that fits the turning point, and the 2 new adjacent points of this circle
+        w = 20
+        curve = np.polyfit([x-w,x,x+w],[y2,y,y2],2)
+
+        # curve[2] += -k*200 if other_lane else k*200
+
+        return list(zip([x-w,x,x+w],[y2,y,y2])), curve
+
+    def remove_horizontal(self, img, k=1, stroke = 10):
+        '''
+        Removes any horizontal lines from the binary image img with a gradient in the range [min_m,max_m]
+        returns: The filtered image
+        '''
+        lines = cv2.HoughLines(img, 1, np.pi / 180, 150, None, 0, 0)
+
+        if lines is not None:
+            for l in lines:
+                rho = l[0][0]
+                theta = l[0][1]
+                a = math.cos(theta)
+                b = math.sin(theta)
+                x0 = a * rho
+                y0 = b * rho
+                pt1 = (int(x0 + 1000*(-b)), int(y0 + 1000*(a)))
+                pt2 = (int(x0 - 1000*(-b)), int(y0 - 1000*(a)))
+
+                if (pt1[0]-pt2[0]) != 0:
+                    m = (pt1[1]-pt2[1])/(pt1[0]-pt2[0])
+                    
+                    if -k < m < k:
+                        cv2.line(img, pt1, pt2, (0,0,0), stroke, cv2.LINE_AA)
+        return img
+
     #Returns saturation channel of img
     def s_hls(self, img):
         hls = cv2.cvtColor(img, cv2.COLOR_BGR2HLS)
@@ -334,23 +395,27 @@ class Lane:
         return np.polyfit(y, x_new, new_ord)
 
 
-def show_image(name, img, size=0.5):
+def show_image(name, img, size=0.35):
     cv2.imshow(name,cv2.resize(img,(int(img.shape[1]*size),int(img.shape[0]*size))))
 
 #TODO: Hough Line transform to remove horizontal lines from the binary image
 
 cap = cv2.VideoCapture(dir_path+"lane-test2.mp4")
-_,frame_org = cap.read()
-# frame_org = cv2.imread(dir_path+"lane2.png")
+# _,frame_org = cap.read()
+frame_org = cv2.imread(dir_path+"lane-test12.png")
 lane = Lane(frame_org.shape[1], frame_org.shape[0])
 
 
 cv2.namedWindow('Hyper Parameters')
-cv2.createTrackbar('Binary Threshold', 'Hyper Parameters', 195, 255, lambda x: None)
-cv2.createTrackbar('Canny Threshold',  'Hyper Parameters', 50, 200,  lambda x: None)
-cv2.createTrackbar('Y-Scale',          'Hyper Parameters', 65, 100,  lambda x: None)
-cv2.createTrackbar('X-Scale',          'Hyper Parameters', 40, 100,  lambda x: None)
-
+cv2.createTrackbar('Binary Threshold',       'Hyper Parameters', 245, 255,    lambda x: None)
+cv2.createTrackbar('Canny Threshold',        'Hyper Parameters', 50,  200,    lambda x: None)
+cv2.createTrackbar('Y-Scale',                'Hyper Parameters', 71,  100,    lambda x: None)
+cv2.createTrackbar('X-Scale',                'Hyper Parameters', 20,  100,    lambda x: None)
+cv2.createTrackbar('Minimum STD',            'Hyper Parameters', 16,  100,    lambda x: None)
+cv2.createTrackbar('Minimum Lane Pts',       'Hyper Parameters', 175, 1000,   lambda x: None)
+cv2.createTrackbar('Distance between Lanes', 'Hyper Parameters', 625,   1000,   lambda x: None)
+cv2.createTrackbar('Horizontal Gradient Range:', 'Hyper Parameters', 1, 200,   lambda x: None)
+cv2.createTrackbar('Horizontal Stroke:', 'Hyper Parameters', 1, 50,   lambda x: None)
 
 
 
@@ -358,9 +423,11 @@ while cap.isOpened():
 
 
     lane.set_roi(cv2.getTrackbarPos('X-Scale','Hyper Parameters')/100,cv2.getTrackbarPos('Y-Scale','Hyper Parameters')/100)
+    lane.set_min_lane_pts(cv2.getTrackbarPos('Minimum Lane Pts','Hyper Parameters'))
+    lane.set_shift(cv2.getTrackbarPos('Distance between Lanes', 'Hyper Parameters'))
 
-    _,frame_org = cap.read()
-    # frame_org = cv2.imread(dir_path+"lane2.png")
+    # _,frame_org = cap.read()
+    frame_org = cv2.imread(dir_path+"lane-test12.png")
     show_image('Original Frame',lane.get_roi(frame_org))
 
     frame = lane.set_gray(frame_org)
@@ -371,32 +438,51 @@ while cap.isOpened():
     warped_frame = lane.get_roi(frame)
     warped_frame = lane.transform(warped_frame,lane.M)
     
-    show_image('Warped Frame',warped_frame)
     # show_image('Warped Frame',cv2.line(warped_frame,(lane.width//2,0),(lane.width//2,lane.height),(255,255,255),3))
 
-    canny_edges = lane.canny_edge(warped_frame, param1=cv2.getTrackbarPos('Canny Threshold','Hyper Parameters'), param2=200)
     frame2 = frame_org.copy()
     frame2 = lane.transform(frame2, lane.M)
     frame2 = cv2.rotate(frame2,cv2.ROTATE_90_CLOCKWISE)
     
+
+    warped_frame = lane.remove_horizontal(warped_frame,
+                                        cv2.getTrackbarPos('Horizontal Gradient Range:', 'Hyper Parameters')/100,
+                                        cv2.getTrackbarPos('Horizontal Stroke:', 'Hyper Parameters'))
+
+    show_image('Warped Frame',warped_frame)
+    canny_edges = lane.canny_edge(warped_frame, param1=cv2.getTrackbarPos('Canny Threshold','Hyper Parameters'), param2=200)
+
     #Rotate Image
     rotated_canny_edges = cv2.rotate(canny_edges, cv2.ROTATE_90_CLOCKWISE)
     
     left,right = lane.get_lanes(rotated_canny_edges)
     left_curve,right_curve = [],[]
 
+    # plt.scatter([x for (x,y) in left],[y for (x,y) in left])
+    # plt.scatter([x for (x,y) in right],[y for (x,y) in right])
+    # plt.show()
+
     try:
-        if left and (left_f := lane.filter_points(left)):
+
+        std_dev = cv2.getTrackbarPos('Minimum STD','Hyper Parameters')/10
+
+        if left and (left_f := lane.filter_points(left,std_dev)):
             left_curve = lane.fit_curve(left_f)
             if not right:
+                print('Inferring Right Lane ['+str(time.time()%32)+']')
                 right_f,right_curve = lane.infer_lane(left_curve,left,True)
+                # right_f,right_curve = lane._infer_lane(left_curve,0.2,True)
+                # plt.scatter([x for x,y in left_f], [y for x,y in left_f])
+                # plt.scatter([x for x,y in right_f], [y for x,y in right_f])
+                # plt.show()
                 
-        if right and (right_f := lane.filter_points(right)):
+        if right and (right_f := lane.filter_points(right,std_dev)):
             right_curve = lane.fit_curve(right_f)
           
             if not left:
-                print('!!!')
+                print('Inferring Left Lane ['+str(time.time()%32)+']')
                 left_f,left_curve = lane.infer_lane(right_curve,right,False)
+                # left_f,left_curve = lane._infer_lane(right_curve,0.2,False)
         
         if len(left_curve) and len(right_curve):
             frame2 = lane.draw_curve(frame2, left_curve,  left_f)
@@ -414,7 +500,6 @@ while cap.isOpened():
         #         print(x/100000000,['RIGHT','LEFT'][dir])
         #     else: print('Straight')
             
-
     except Exception as e: print(str(e))
     
 
