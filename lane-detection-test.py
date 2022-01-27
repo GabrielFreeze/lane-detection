@@ -8,7 +8,7 @@ import copy
 dir_path = os.path.dirname(os.path.realpath(__file__))+'/'
 
 class Lane:
-    def __init__(self, width, height, x_scl=0.4, y_scl=0.55):
+    def __init__(self, width, height, x_scl=0.7, y_scl=0.49):
         self.width = width
         self.height = height
 
@@ -22,7 +22,7 @@ class Lane:
         self.wrp_x1 = self.width/2 - self.width/10
         self.wrp_x2 = self.width/2 + self.width/10
 
-        self.warp_cut = 0.625;
+        self.warp_cut = 0.44;
         self.min_lane_pts = 175         #Minimum Number of Points a detected lane line should contain.
                                         #Less than that, then it is considered noise.
         self.shift = 20                 #The estimated distance in px between the 2 lanes. Used for lane inference
@@ -69,12 +69,29 @@ class Lane:
     def eq_hist(self, img): # Histogram normalization
         return cv2.equalizeHist(img)
 
-    def bin_thresh(self, img, param1=195, param2=255):
-        _,frame = cv2.threshold(img,param1,param2,cv2.THRESH_BINARY)
+    def bin_thresh(self, img, p=1, c=4):
+        frame = cv2.adaptiveThreshold(img,255,cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV,p,c)
+        # _,frame = cv2.threshold(img,param1,param2,cv2.THRESH_BINARY_INV)
         return frame
 
     def canny_edge(self, img, param1=0, param2=255):
         return cv2.Canny(img, param1, param2, 1)
+
+
+    def block_front(self,img):
+        a = (0.00*self.width,      1.00*self.height)
+        b = (0.10*self.width,      0.75*self.height)
+        c = (0.90*self.width,      0.75*self.height)
+        d = (1.00*self.width,      1.00*self.height)
+
+        mask=np.zeros_like(img)
+        mask_vertices = np.array([[a,b,c,d]], dtype=np.int32)
+
+        cv2.fillPoly(mask, mask_vertices, 255)
+        _,mask = cv2.threshold(mask,0,255,cv2.THRESH_BINARY_INV)
+        return cv2.bitwise_and(img, mask)
+
+
 
     def get_lanes(self, edges):
         '''
@@ -412,21 +429,22 @@ class Lane:
         return np.polyfit(y, x_new, new_ord)
 
 
-def show_image(name, img, size=0.35):
+def show_image(name, img, size=0.8):
     cv2.imshow(name,cv2.resize(img,(int(img.shape[1]*size),int(img.shape[0]*size))))
 
-cap = cv2.VideoCapture(dir_path+"vid1.h264")
-_,frame_org = cap.read()
-# frame_org = cv2.imread(dir_path+"lane-test11.png")
+cap = cv2.VideoCapture(dir_path+"lane-test5.mp4")
+# _,frame_org = cap.read()
+frame_org = cv2.imread(dir_path+"lane-test16.png")
 lane = Lane(frame_org.shape[1], frame_org.shape[0])
 
 
 cv2.namedWindow('Hyper Parameters')
-cv2.createTrackbar('Binary Threshold',       'Hyper Parameters', 235, 255,    lambda x: None)
+cv2.createTrackbar('Binary Threshold 1',       'Hyper Parameters', 30, 100,    lambda x: None)
+cv2.createTrackbar('Binary Threshold 2',       'Hyper Parameters', 100, 100,    lambda x: None)
 cv2.createTrackbar('Canny Threshold',        'Hyper Parameters', 50,  200,    lambda x: None)
-cv2.createTrackbar('Y-Scale',                'Hyper Parameters', 70,  100,    lambda x: None)
-cv2.createTrackbar('X-Scale',                'Hyper Parameters', 34,  100,    lambda x: None)
-cv2.createTrackbar('Warp Cut',               'Hyper Parameters', 50,  100,    lambda x: None)
+cv2.createTrackbar('Y-Scale',                'Hyper Parameters', 49,  100,    lambda x: None)
+cv2.createTrackbar('X-Scale',                'Hyper Parameters', 7,  100,    lambda x: None)
+cv2.createTrackbar('Warp Cut',               'Hyper Parameters', 40,  100,    lambda x: None)
 cv2.createTrackbar('Minimum STD',            'Hyper Parameters', 16,  100,    lambda x: None)
 cv2.createTrackbar('Minimum Lane Pts',       'Hyper Parameters', 175, 1000,   lambda x: None)
 cv2.createTrackbar('Distance between Lanes', 'Hyper Parameters', 625,   1000,   lambda x: None)
@@ -443,14 +461,18 @@ while cap.isOpened():
     lane.set_shift(cv2.getTrackbarPos('Distance between Lanes', 'Hyper Parameters'))
     lane.set_warp_cut(cv2.getTrackbarPos('Warp Cut', 'Hyper Parameters')/100)
 
-    _,frame_org = cap.read()
-    # frame_org = cv2.imread(dir_path+"lane-test11.png")
+    # _,frame_org = cap.read()
+    frame_org = cv2.imread(dir_path+"lane-test16.png")
     show_image('Original Frame',lane.get_roi(frame_org))
 
     frame = lane.set_gray(frame_org)
-    frame = lane.eq_hist(frame)
+    # frame = lane.eq_hist(frame)
+    odd_val = cv2.getTrackbarPos('Binary Threshold 2','Hyper Parameters')
+    if odd_val % 2 == 0: odd_val += 1
 
-    frame = lane.bin_thresh(frame,param1=cv2.getTrackbarPos('Binary Threshold','Hyper Parameters'),param2=255)
+    frame = lane.bin_thresh(frame,p=odd_val,c=cv2.getTrackbarPos('Binary Threshold 1','Hyper Parameters'))
+    frame = lane.block_front(frame)
+    show_image('Block front',frame)
 
     warped_frame = lane.get_roi(frame)
     warped_frame = lane.transform(warped_frame,lane.M)
@@ -462,9 +484,9 @@ while cap.isOpened():
     frame2 = cv2.rotate(frame2,cv2.ROTATE_90_CLOCKWISE)
     
 
-    warped_frame = lane.remove_horizontal(warped_frame,
-                                        cv2.getTrackbarPos('Horizontal Gradient Range:', 'Hyper Parameters')/100,
-                                        cv2.getTrackbarPos('Horizontal Stroke:', 'Hyper Parameters'))
+    # warped_frame = lane.remove_horizontal(warped_frame,
+    #                                     cv2.getTrackbarPos('Horizontal Gradient Range:', 'Hyper Parameters')/100,
+    #                                     cv2.getTrackbarPos('Horizontal Stroke:', 'Hyper Parameters'))
 
     show_image('Warped Frame',warped_frame)
     canny_edges = lane.canny_edge(warped_frame, param1=cv2.getTrackbarPos('Canny Threshold','Hyper Parameters'), param2=200)
@@ -507,15 +529,16 @@ while cap.isOpened():
             pass
 
 
-        dir, offset = lane.lane_offset(left_f,right_f)
-        lor = ['LEFT','RIGHT'][dir]
-        print(f'Offset: {offset} Dir: {lor}')
+        # dir, offset = lane.lane_offset(left_f,right_f)
+        # lor = ['LEFT','RIGHT'][dir]
+        # print(f'Offset: {offset} Dir: {lor}')
 
-        # if curve1 and curve2:
-        #     curve = (curve1+curve2)/2.0
-        # elif curve1:
-        #     curve = curve1
-        # else: curve = curve2
+        if curve1 and curve2:
+            curve = (curve1+curve2)/2.0
+        elif curve1:
+            curve = curve1
+        else: curve = curve2
+        print(curve1/100000000,curve2/100000000)
 
         # if int(time.time()*32) % 2 == 0:
         #     if curve/100000000 < 200:
