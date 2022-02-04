@@ -7,10 +7,13 @@ from matplotlib import pyplot as plt
 import copy
 dir_path = os.path.dirname(os.path.realpath(__file__))+'/'
 
+
 class Lane:
-    def __init__(self, width, height, x_scl=0.7, y_scl=0.49):
+    def __init__(self, width, height, x_scl=0.07, y_scl=0.49):
         self.width = width
         self.height = height
+
+        # y_scl = 0.59
 
         a = (0.00*self.width,      1.00*self.height)
         b = (x_scl*self.width,     y_scl*self.height)
@@ -22,8 +25,14 @@ class Lane:
         self.wrp_x1 = self.width/2 - self.width/10
         self.wrp_x2 = self.width/2 + self.width/10
 
-        self.warp_cut = 0.44;
-        self.min_lane_pts = 175         #Minimum Number of Points a detected lane line should contain.
+
+        self.center = self.width//2
+        self.prev_center = -1
+
+        self.warp_cut = 0.35
+
+
+        self.min_lane_pts = 20          #Minimum Number of Points a detected lane line should contain.
                                         #Less than that, then it is considered noise.
         self.shift = 20                 #The estimated distance in px between the 2 lanes. Used for lane inference
         self.MAX_RADIUS = float('inf')  #Largest possible lane curve radius
@@ -48,7 +57,7 @@ class Lane:
 
     def set_shift(self,x):
         self.shift = x
-
+    
     def set_warp_cut(self,x):
         self.warp_cut = x;
         self.M, self.Minv = self.create_m() 
@@ -69,14 +78,13 @@ class Lane:
     def eq_hist(self, img): # Histogram normalization
         return cv2.equalizeHist(img)
 
-    def bin_thresh(self, img, p=1, c=4):
+    def bin_thresh(self, img, p=91,c=30):
         frame = cv2.adaptiveThreshold(img,255,cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV,p,c)
         # _,frame = cv2.threshold(img,param1,param2,cv2.THRESH_BINARY_INV)
         return frame
 
     def canny_edge(self, img, param1=0, param2=255):
         return cv2.Canny(img, param1, param2, 1)
-
 
     def block_front(self,img):
         a = (0.00*self.width,      1.00*self.height)
@@ -90,8 +98,6 @@ class Lane:
         cv2.fillPoly(mask, mask_vertices, 255)
         _,mask = cv2.threshold(mask,0,255,cv2.THRESH_BINARY_INV)
         return cv2.bitwise_and(img, mask)
-
-
 
     def get_lanes(self, edges):
         '''
@@ -119,7 +125,6 @@ class Lane:
             bottom_ptsY = []
             bottom = []
             
-
             #Put points in the correct array
             for y,x in pts_zip:
                 if y > midY:
@@ -128,7 +133,7 @@ class Lane:
                 else:
                     bottom_ptsX.append(x)
                     bottom_ptsY.append(y+edges.shape[0])
-            
+
             if len(top_ptsX) > self.min_lane_pts:
                 top = list(zip(top_ptsX,top_ptsY))
 
@@ -152,15 +157,20 @@ class Lane:
         returns a subset of pts such that any point's y coordinate's standard deviation that is not considered noise.
         '''
 
-        #If there aren't enough points, treat the detected points as noise.
-        if len(pts) < self.min_lane_pts:
-            return []
+        # print(f'Length of Original Points: {len(pts)}')
 
         #Filter top lines to remove outlier points (noise)
         pts_y = [y for (x,y) in pts]
         mean = np.mean(pts_y)
         std = np.std(pts_y)
-        return [(x,y) for (x,y) in pts if abs((y-mean)/std) < dev]
+        filtered = [(x,y) for (x,y) in pts if abs((y-mean)/std) < dev]
+
+        # print(f'Length of Filtered Points: {len(filtered)}')
+
+        #If there aren't enough points, treat the detected points as noise.
+        if len(filtered) < self.min_lane_pts:
+            return []
+        else: return filtered
 
     def fit_curve(self, pts, order=2):
         '''
@@ -185,7 +195,7 @@ class Lane:
         y = [img.shape[0]-i for i in y_org]
         pts = np.array(list(zip(x,y)), np.int32)
 
-        return cv2.polylines(img, [pts], False, (0,0,255),10)
+        return cv2.polylines(img, [pts], False, (0,0,255),4)
 
     def infer_lane(self, pol, pts, other_lane):
         '''
@@ -279,6 +289,26 @@ class Lane:
         gb = cv2.GaussianBlur(img, (5,5), 20.0)
         return cv2.addWeighted(img, 2, gb, -1, 0)
 
+
+    def update_center(self, l_dist, r_dist):
+
+        # neg = False
+        # ita = 0.05
+        # diff = r_dist - l_dist
+
+        # if diff < 0:
+        #     neg = True
+        #     abs(diff)
+        
+        # min_dist, max_dist = 30,100
+
+        # delta = (((diff - min_dist) * self.width) / (max_dist - min_dist))
+
+        # if neg: self.center -= int(delta * ita)
+        # else:   self.center += int(delta * ita)
+        # print(self.center)
+        return
+
     # Compute linear image transformation img*s+m
     def lin_img(self, img,s=1.0,m=0.0):
         img2=cv2.multiply(img, np.array([s]))
@@ -352,6 +382,38 @@ class Lane:
     def px_to_m(self, px): # Conver ofset in pixels in x axis into m
         return self.xm_in_px*px
 
+    def lane_offset(self, left, right):
+        midY = self.width/2
+        # midY = self.height/2
+        l_avg, r_avg = 0,0
+        l_dist, r_dist = 0,0
+
+        lleft = len(left)
+        lright = len(right)
+
+        # print(f'Length of left lane: {lleft}')
+        # print(f'Length of right lane: {lright}')
+
+        if not (left or right):
+            return 0,0
+
+        if left:  
+            l_avg  = np.mean(np.array([y for (_,y) in left], dtype=np.int32))
+            l_dist = abs(midY-l_avg)
+        if right: 
+            r_avg = np.mean(np.array([y for (_,y) in right],dtype=np.int32))
+            r_dist = abs(midY-r_avg)
+
+        # print(f'Average left lane y-coordinate: {l_avg}')
+        # print(f'Average right lane y-coordinate: {r_avg}')
+        # print(f'Middle y-coordinate: {midY}')
+
+
+        print(f'Left: {l_dist}')
+        print(f'Right: {r_dist}')
+
+        return l_dist,r_dist
+
     # Calculate radius of curvature of a line
     def r_curv(self, pol, y):
         if len(pol) == 2: # If the polinomial is a linear function
@@ -376,27 +438,6 @@ class Lane:
             return val, dir
         else:
             return self.MAX_RADIUS
-
-    def lane_offset(self, left, right):
-        midY = self.width/2
-        l_dist, r_dist = 0,0
-        
-        if left:  
-            l_avg  = np.mean(np.array([y for (_,y) in left], dtype=np.int32))
-            l_dist = abs(midY-l_avg)
-
-        if right: 
-            r_avg = np.mean(np.array([y for (_,y) in right],dtype=np.int32))
-            r_dist = abs(midY-r_avg)
-
-
-        print(f'Left: {l_dist}')
-        print(f'Right: {r_dist}')
-
-        
-        if l_dist and r_dist:       return l_dist > r_dist, min(l_dist, r_dist)
-        elif l_dist and not r_dist: return True, l_dist
-        else:                       return False,  r_dist
 
     def mean_squared_error(self,true,pred):
         return np.square(np.subtract(true,pred)).mean()
@@ -428,25 +469,220 @@ class Lane:
         x_new = (x+x_p)/2.0
         return np.polyfit(y, x_new, new_ord)
 
+    def get_radius(self, frame_org):
 
-def show_image(name, img, size=0.8):
+        frame = self.set_gray(frame_org)
+        # frame = self.eq_hist(frame)
+
+        frame = self.bin_thresh(frame)
+        frame = self.block_front(frame)
+
+        warped_frame = self.get_roi(frame)
+        warped_frame = self.transform(warped_frame, self.M)
+    
+        frame2 = frame_org.copy()
+        frame2 = self.transform(frame2, self.M)
+        frame2 = cv2.rotate(frame2,cv2.ROTATE_90_CLOCKWISE)
+    
+
+        warped_frame = self.remove_horizontal(warped_frame,
+                                            1/100,
+                                            10)
+
+        canny_edges = self.canny_edge(warped_frame, param1=50, param2=200)
+
+        #Rotate Image
+        rotated_canny_edges = cv2.rotate(canny_edges, cv2.ROTATE_90_CLOCKWISE)
+    
+        left,right = self.get_lanes(rotated_canny_edges)
+        left_curve,right_curve = [],[]
+
+
+        try:
+
+            std_dev = 1.6
+
+            if left:
+                left_f = self.filter_points(left,std_dev)
+                if left_f: 
+                    left_curve = self.fit_curve(left_f)
+                    
+            if right:
+                right_f = self.filter_points(right,std_dev)
+                if right_f:
+                    right_curve = self.fit_curve(right_f)
+            
+            
+            curve1,curve2 = 0,0
+            dir1, dir2 = False, False
+
+            if len(left_curve):
+                curve1, dir1 = self.lane_curv(left_curve)
+                # frame2 = lane.draw_curve(frame2, left_curve,  left_f)
+            if len(right_curve):
+                curve2, dir2 = self.lane_curv(right_curve)
+                # frame2 = lane.draw_curve(frame2, right_curve, right_f)
+            else:
+                #No lanes were detected
+                #Do something?
+                pass
+
+            if curve1 and curve2:
+                curve = (curve1+curve2)/2.0
+            elif curve1:
+                curve = curve1
+            else: curve = curve2
+
+            return curve*10e-8, (dir1 and dir2)
+                
+        except Exception as e: 
+            print(str(e))
+            return (-1,False)
+
+    def get_offset(self, frame_org):
+        frame = self.set_gray(frame_org)
+        # frame = self.eq_hist(frame)
+        frame = self.bin_thresh(frame)
+        frame = self.block_front(frame)
+
+        warped_frame = self.get_roi(frame)
+        warped_frame = self.transform(warped_frame, self.M)
+    
+        frame2 = frame_org.copy()
+        frame2 = self.transform(frame2, self.M)
+        frame2 = cv2.rotate(frame2,cv2.ROTATE_90_CLOCKWISE)
+    
+
+        # warped_frame = self.remove_horizontal(warped_frame,
+        #                                     1/100,
+        #                                     10)
+
+        canny_edges = self.canny_edge(warped_frame, param1=50, param2=200)
+
+        left_curve,right_curve = [],[]
+        left_f,right_f = [],[]
+        
+        #Rotate Image
+        rotated_canny_edges = cv2.rotate(canny_edges, cv2.ROTATE_90_CLOCKWISE)
+    
+        left,right = self.get_lanes(rotated_canny_edges)
+        offset,dir = 0,False
+
+        try:
+
+            
+            if left:
+                left_f = self.filter_points(left)
+                # if left_f: 
+                #     left_curve = self.fit_curve(left_f)
+                    
+            if right:
+                right_f = self.filter_points(right)
+                # if right_f:
+                #     right_curve = self.fit_curve(right_f)
+            
+            l_dist, r_dist = self.lane_offset(left_f,right_f)
+            
+
+            return l_dist, r_dist
+            
+                
+        except Exception as e: 
+            print(str(e))
+            return (0,0)
+
+    def vis(self, frame_org):
+        frame = self.set_gray(frame_org)
+        # frame = self.eq_hist(frame)
+
+        frame = self.bin_thresh(frame)
+        frame = self.block_front(frame)
+
+        warped_frame = self.get_roi(frame)
+        warped_frame = self.transform(warped_frame, self.M)
+    
+        frame2 = frame_org.copy()
+        frame2 = self.transform(frame2, self.M)
+        frame2 = cv2.rotate(frame2,cv2.ROTATE_90_CLOCKWISE)
+    
+
+        # warped_frame = self.remove_horizontal(warped_frame,
+        #                                     1/100,
+        #                                     10)
+
+        canny_edges = self.canny_edge(warped_frame, param1=50, param2=200)
+
+        left,right = [],[]
+        left_curve,right_curve = [],[]
+        #Rotate Image
+        rotated_canny_edges = cv2.rotate(canny_edges, cv2.ROTATE_90_CLOCKWISE)
+        left,right = self.get_lanes(rotated_canny_edges)
+
+
+        try:
+            left_f, right_f = [],[]
+            std_dev = 1.6
+
+            if left:
+                left_f = self.filter_points(left)
+                if left_f: 
+                    left_curve = self.fit_curve(left_f)
+                    
+            if right:
+                right_f = self.filter_points(right)
+                if right_f:
+                    right_curve = self.fit_curve(right_f)
+            
+
+            if len(left_curve):
+                curve1, dir1 = self.lane_curv(left_curve)
+                frame2 = self.draw_curve(frame2, left_curve,  left_f)
+            if len(right_curve):
+                curve2, dir2 = self.lane_curv(right_curve)
+                frame2 = self.draw_curve(frame2, right_curve, right_f)
+            else:
+                #No lanes were detected
+                #Do something?
+                pass
+            
+            frame2 = cv2.rotate(frame2,cv2.ROTATE_90_COUNTERCLOCKWISE)
+            cv2.line(frame2, (self.width//2, 0),(self.width//2, self.height), (0, 255, 0), 1) #Middle Point
+            frame2 = self.transform(frame2, self.Minv)
+
+            # if left_f:
+            #     l_avg  = np.mean(np.array([y for (_,y) in left_f], dtype=np.int32))
+            #     cv2.line(frame2, (l_avg, 0),(l_avg, self.height), (255,0, 0), 3) #Left Lane Average
+            
+            # if right_f:
+            #     r_avg  = np.mean(np.array([y for (_,y) in right_f], dtype=np.int32))
+            #     cv2.line(frame2, (r_avg, 0),(r_avg, self.height), (0, 0, 255), 3) #Right Lane Average
+
+
+            return frame2
+                
+        except Exception as e: 
+            print(str(e))
+            return (0,False)
+
+
+def show_image(name, img, size=1):
     cv2.imshow(name,cv2.resize(img,(int(img.shape[1]*size),int(img.shape[0]*size))))
 
 cap = cv2.VideoCapture(dir_path+"lane-test5.mp4")
-# _,frame_org = cap.read()
-frame_org = cv2.imread(dir_path+"lane-test16.png")
+_,frame_org = cap.read()
+frame_org = cv2.imread(dir_path+"lane-test18.png")
 lane = Lane(frame_org.shape[1], frame_org.shape[0])
 
 
 cv2.namedWindow('Hyper Parameters')
 cv2.createTrackbar('Binary Threshold 1',       'Hyper Parameters', 30, 100,    lambda x: None)
-cv2.createTrackbar('Binary Threshold 2',       'Hyper Parameters', 100, 100,    lambda x: None)
-cv2.createTrackbar('Canny Threshold',        'Hyper Parameters', 50,  200,    lambda x: None)
+cv2.createTrackbar('Binary Threshold 2',       'Hyper Parameters', 91, 100,    lambda x: None)
+cv2.createTrackbar('Canny Threshold',        'Hyper Parameters', 0,  200,    lambda x: None)
 cv2.createTrackbar('Y-Scale',                'Hyper Parameters', 49,  100,    lambda x: None)
 cv2.createTrackbar('X-Scale',                'Hyper Parameters', 7,  100,    lambda x: None)
-cv2.createTrackbar('Warp Cut',               'Hyper Parameters', 40,  100,    lambda x: None)
+cv2.createTrackbar('Warp Cut',               'Hyper Parameters', 35,  100,    lambda x: None)
 cv2.createTrackbar('Minimum STD',            'Hyper Parameters', 16,  100,    lambda x: None)
-cv2.createTrackbar('Minimum Lane Pts',       'Hyper Parameters', 175, 1000,   lambda x: None)
+cv2.createTrackbar('Minimum Lane Pts',       'Hyper Parameters', 20, 1000,   lambda x: None)
 cv2.createTrackbar('Distance between Lanes', 'Hyper Parameters', 625,   1000,   lambda x: None)
 cv2.createTrackbar('Horizontal Gradient Range:', 'Hyper Parameters', 1, 200,   lambda x: None)
 cv2.createTrackbar('Horizontal Stroke:', 'Hyper Parameters', 1, 50,   lambda x: None)
@@ -462,7 +698,7 @@ while cap.isOpened():
     lane.set_warp_cut(cv2.getTrackbarPos('Warp Cut', 'Hyper Parameters')/100)
 
     # _,frame_org = cap.read()
-    frame_org = cv2.imread(dir_path+"lane-test16.png")
+    frame_org = cv2.imread(dir_path+"lane-test18.png")
     show_image('Original Frame',lane.get_roi(frame_org))
 
     frame = lane.set_gray(frame_org)
@@ -507,15 +743,14 @@ while cap.isOpened():
 
         std_dev = cv2.getTrackbarPos('Minimum STD','Hyper Parameters')/10
 
-        if left and (left_f := lane.filter_points(left,std_dev)):
+        if left:
+            left_f = lane.filter_points(left,std_dev)
             left_curve = lane.fit_curve(left_f)
                 
-        if right and (right_f := lane.filter_points(right,std_dev)):
+        if right:
+            right_f = lane.filter_points(right,std_dev)
             right_curve = lane.fit_curve(right_f)
           
-        
-        curve1,curve2 = 0,0
-        dir1, dir2 = False, False
 
         if len(left_curve):
             curve1, dir1 = lane.lane_curv(left_curve)
@@ -529,16 +764,29 @@ while cap.isOpened():
             pass
 
 
-        # dir, offset = lane.lane_offset(left_f,right_f)
-        # lor = ['LEFT','RIGHT'][dir]
-        # print(f'Offset: {offset} Dir: {lor}')
+        l_dist, r_dist = lane.lane_offset(left_f,right_f)
 
-        if curve1 and curve2:
-            curve = (curve1+curve2)/2.0
-        elif curve1:
-            curve = curve1
-        else: curve = curve2
-        print(curve1/100000000,curve2/100000000)
+        min_dist, max_dist = 30,100
+        if l_dist and r_dist:
+            if l_dist > max_dist: l_dist = max_dist
+            if r_dist > max_dist: r_dist = max_dist
+
+            if l_dist < min_dist: l_dist = min_dist
+            if r_dist < min_dist: r_dist = min_dist
+        
+        elif l_dist and not r_dist:
+            if l_dist > max_dist: l_dist = max_dist
+            if l_dist < min_dist: l_dist = min_dist
+            r_dist = max_dist
+        elif r_dist and not l_dist:
+            if r_dist > max_dist: r_dist = max_dist
+            if r_dist < min_dist: r_dist = min_dist
+            l_dist = max_dist
+
+
+        print(f'Left: {l_dist}')
+        print(f'Right: {r_dist}')
+
 
         # if int(time.time()*32) % 2 == 0:
         #     if curve/100000000 < 200:
@@ -552,8 +800,10 @@ while cap.isOpened():
 
     #Show frame
     frame2 = cv2.rotate(frame2,cv2.ROTATE_90_COUNTERCLOCKWISE)
-    show_image('Warped Output Frame',frame2)
-
+    # show_image('Warped Output Frame',frame2)
+    
+    cv2.line(frame2, (lane.center, 0),(lane.center, lane.height), (0, 255, 0), 1) #Middle Point
+    lane.update_center(l_dist, r_dist)
     frame2 = lane.transform(frame2, lane.Minv)
     show_image('Output Frame',frame2)
     
