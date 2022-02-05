@@ -458,8 +458,6 @@ class Lane:
 
         print(f'Average Distance between lanes: {dist}')
 
-
-        
         return dist < self.min_dist_lanes
 
 
