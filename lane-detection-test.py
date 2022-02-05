@@ -30,6 +30,7 @@ class Lane:
         self.prev_center = -1
 
         self.warp_cut = 0.35
+        self.min_dist_lanes = 130
 
 
         self.min_lane_pts = 20          #Minimum Number of Points a detected lane line should contain.
@@ -54,6 +55,9 @@ class Lane:
 
     def set_gray(self, img):
        return cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) 
+
+    def set_min_dist_lanes(self,x):
+        self.min_dist_lanes = x
 
     def set_shift(self,x):
         self.shift = x
@@ -439,6 +443,26 @@ class Lane:
         else:
             return self.MAX_RADIUS
 
+
+    def lanes_overlap(self, left, right):
+        
+        #Calculate average point in left and right
+        lx = np.mean(np.array([x for (x,y) in left],dtype=np.int32))
+        ly = np.mean(np.array([y for (x,y) in left],dtype=np.int32))
+
+        rx = np.mean(np.array([x for (x,y) in right],dtype=np.int32))
+        ry = np.mean(np.array([y for (x,y) in right],dtype=np.int32))
+
+        #Calculate euclidian distance between average points
+        dist = math.sqrt((lx-rx)**2 + (ly-ry)**2)
+
+        print(f'Average Distance between lanes: {dist}')
+
+
+        
+        return dist < self.min_dist_lanes
+
+
     def mean_squared_error(self,true,pred):
         return np.square(np.subtract(true,pred)).mean()
 
@@ -683,7 +707,7 @@ cv2.createTrackbar('X-Scale',                'Hyper Parameters', 7,  100,    lam
 cv2.createTrackbar('Warp Cut',               'Hyper Parameters', 35,  100,    lambda x: None)
 cv2.createTrackbar('Minimum STD',            'Hyper Parameters', 16,  100,    lambda x: None)
 cv2.createTrackbar('Minimum Lane Pts',       'Hyper Parameters', 20, 1000,   lambda x: None)
-cv2.createTrackbar('Distance between Lanes', 'Hyper Parameters', 625,   1000,   lambda x: None)
+cv2.createTrackbar('Distance between Lanes', 'Hyper Parameters', 122,   160,   lambda x: None)
 cv2.createTrackbar('Horizontal Gradient Range:', 'Hyper Parameters', 1, 200,   lambda x: None)
 cv2.createTrackbar('Horizontal Stroke:', 'Hyper Parameters', 1, 50,   lambda x: None)
 
@@ -694,7 +718,7 @@ while cap.isOpened():
 
     lane.set_roi(cv2.getTrackbarPos('X-Scale','Hyper Parameters')/100,cv2.getTrackbarPos('Y-Scale','Hyper Parameters')/100)
     lane.set_min_lane_pts(cv2.getTrackbarPos('Minimum Lane Pts','Hyper Parameters'))
-    lane.set_shift(cv2.getTrackbarPos('Distance between Lanes', 'Hyper Parameters'))
+    lane.set_min_dist_lanes(cv2.getTrackbarPos('Distance between Lanes', 'Hyper Parameters'))
     lane.set_warp_cut(cv2.getTrackbarPos('Warp Cut', 'Hyper Parameters')/100)
 
     # _,frame_org = cap.read()
@@ -731,7 +755,7 @@ while cap.isOpened():
     rotated_canny_edges = cv2.rotate(canny_edges, cv2.ROTATE_90_CLOCKWISE)
     
     left,right = lane.get_lanes(rotated_canny_edges)
-    
+
     left_f, right_f = [],[]
     left_curve,right_curve = [],[]
 
@@ -752,40 +776,66 @@ while cap.isOpened():
             right_curve = lane.fit_curve(right_f)
           
 
-        if len(left_curve):
-            curve1, dir1 = lane.lane_curv(left_curve)
-            frame2 = lane.draw_curve(frame2, left_curve,  left_f)
-        if len(right_curve):
-            curve2, dir2 = lane.lane_curv(right_curve)
-            frame2 = lane.draw_curve(frame2, right_curve, right_f)
+        if lane.lanes_overlap(left_f, right_f) == True:
+            #The detected lanes are incorrect
+            #Calculate radius of curvature of all points
+            #Use radius to calculate angle of steering
+
+            all_pts = left_f + right_f
+            c = lane.fit_curve(all_pts)
+            radius, dir = lane.lane_curv(c)
+            radius *= 10e-7
+
+            # print(["RIGHT","LEFT"][dir])
+            # print(f'Radius: {radius}')
+
+
+            #These types of l_dist and r_dist will invoke a steering to the left or right in the CommandGeneratorProcess
+            if dir: l_dist,r_dist = 100,30 #LEFT
+            else:   l_dist,r_dist = 30,100 #RIGHT
+
+            print(f'Left: {l_dist}')
+            print(f'Right: {r_dist}')
+
+
+            frame2 = lane.draw_curve(frame2, c, all_pts)
+
         else:
-            #No lanes were detected
-            #Do something?
-            pass
+
+            if len(left_curve):
+                curve1, dir1 = lane.lane_curv(left_curve)
+                frame2 = lane.draw_curve(frame2, left_curve,  left_f)
+            if len(right_curve):
+                curve2, dir2 = lane.lane_curv(right_curve)
+                frame2 = lane.draw_curve(frame2, right_curve, right_f)
+            else:
+                #No lanes were detected
+                #Do something?
+                pass
 
 
-        l_dist, r_dist = lane.lane_offset(left_f,right_f)
+            l_dist, r_dist = lane.lane_offset(left_f,right_f)
 
-        min_dist, max_dist = 30,100
-        if l_dist and r_dist:
-            if l_dist > max_dist: l_dist = max_dist
-            if r_dist > max_dist: r_dist = max_dist
+            min_dist, max_dist = 30,100
+            if l_dist and r_dist:
+                if l_dist > max_dist: l_dist = max_dist
+                if r_dist > max_dist: r_dist = max_dist
 
-            if l_dist < min_dist: l_dist = min_dist
-            if r_dist < min_dist: r_dist = min_dist
-        
-        elif l_dist and not r_dist:
-            if l_dist > max_dist: l_dist = max_dist
-            if l_dist < min_dist: l_dist = min_dist
-            r_dist = max_dist
-        elif r_dist and not l_dist:
-            if r_dist > max_dist: r_dist = max_dist
-            if r_dist < min_dist: r_dist = min_dist
-            l_dist = max_dist
+                if l_dist < min_dist: l_dist = min_dist
+                if r_dist < min_dist: r_dist = min_dist
+            
+            elif l_dist and not r_dist:
+                if l_dist > max_dist: l_dist = max_dist
+                if l_dist < min_dist: l_dist = min_dist
+                r_dist = max_dist
+            elif r_dist and not l_dist:
+                if r_dist > max_dist: r_dist = max_dist
+                if r_dist < min_dist: r_dist = min_dist
+                l_dist = max_dist
 
 
-        print(f'Left: {l_dist}')
-        print(f'Right: {r_dist}')
+            print(f'Left: {l_dist}')
+            print(f'Right: {r_dist}')
 
 
         # if int(time.time()*32) % 2 == 0:
@@ -803,7 +853,7 @@ while cap.isOpened():
     # show_image('Warped Output Frame',frame2)
     
     cv2.line(frame2, (lane.center, 0),(lane.center, lane.height), (0, 255, 0), 1) #Middle Point
-    lane.update_center(l_dist, r_dist)
+    
     frame2 = lane.transform(frame2, lane.Minv)
     show_image('Output Frame',frame2)
     
