@@ -54,6 +54,19 @@ class Lane:
     def set_min_lane_pts(self, x):
         self.min_lane_pts = x;
 
+    def detect_line_segments(self, edges):
+        # tuning min_threshold, minLineLength, maxLineGap is a trial and error process by hand
+        rho = 1  # distance precision in pixel, i.e. 1 pixel
+        angle = np.pi / 180  # angular precision in radian, i.e. 1 degree
+        min_threshold = 10  # minimal of votes
+        # line_segments = cv2.HoughLinesP(edges, rho, angle, min_threshold, 
+        #                                 np.array([]), minLineLength=8, maxLineGap=4)
+        
+        
+        line_segments = cv2.HoughLines(frame, 1, np.pi / 180, 150, None, 0,0)
+
+        return line_segments
+
     def set_gray(self, img):
        return cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) 
 
@@ -104,6 +117,72 @@ class Lane:
         _,mask = cv2.threshold(mask,0,255,cv2.THRESH_BINARY_INV)
         return cv2.bitwise_and(img, mask)
 
+
+    def average_slope_intercept(self, frame, line_segments):
+        """
+        This function combines line segments into one or two lane lines
+        If all line slopes are < 0: then we only have detected left lane
+        If all line slopes are > 0: then we only have detected right lane
+        """
+        lane_lines = []
+        if line_segments is None:
+            return lane_lines
+
+        height, width = self.height, self.width
+        left_fit = []
+        right_fit = []
+
+        boundary = 1/3
+        left_region_boundary = width * (1 - boundary)  # left lane line segment should be on left 2/3 of the screen
+        right_region_boundary = width * boundary # right lane line segment should be on left 2/3 of the screen
+
+        for line_segment in line_segments:
+            for x1, y1, x2, y2 in line_segment:
+                if x1 == x2:
+                    continue
+
+                fit = np.polyfit((x1, x2), (y1, y2), 1)
+                slope = fit[0]
+                intercept = fit[1]
+                if slope < 0:
+                    if x1 < left_region_boundary and x2 < left_region_boundary:
+                        left_fit.append((slope, intercept))
+                else:
+                    if x1 > right_region_boundary and x2 > right_region_boundary:
+                        right_fit.append((slope, intercept))
+
+        left_fit_average = np.average(left_fit, axis=0)
+        if len(left_fit) > 0:
+            lane_lines.append(self.make_points(frame, left_fit_average))
+
+        right_fit_average = np.average(right_fit, axis=0)
+        if len(right_fit) > 0:
+            lane_lines.append(self.make_points(frame, right_fit_average))
+
+
+        return lane_lines
+
+
+    def make_points(self, frame, line):
+        height, width = frame.shape
+        slope, intercept = line
+        y1 = height  # bottom of the frame
+        y2 = int(y1 * 1 / 2)  # make points from middle of the frame down
+
+        # bound the coordinates within the frame
+        x1 = max(-width, min(2 * width, int((y1 - intercept) / slope)))
+        x2 = max(-width, min(2 * width, int((y2 - intercept) / slope)))
+        return [[x1, y1, x2, y2]]
+
+
+    def display_lines(self, frame, lines, line_color=(0, 255, 0), line_width=2):
+        line_image = np.zeros_like(frame)
+        if lines is not None:
+            for line in lines:
+                for x1, y1, x2, y2 in line:
+                    cv2.line(line_image, (x1, y1), (x2, y2), line_color, line_width)
+        line_image = cv2.addWeighted(frame, 0.8, line_image, 1, 1)
+        return line_image
 
     def get_lanes(self, edges):
         '''
@@ -422,6 +501,9 @@ class Lane:
 
         return l_dist,r_dist
 
+
+
+
     # Calculate radius of curvature of a line
     def r_curv(self, pol, y):
         if len(pol) == 2: # If the polinomial is a linear function
@@ -694,18 +776,18 @@ class Lane:
 def show_image(name, img, size=0.8):
     cv2.imshow(name,cv2.resize(img,(int(img.shape[1]*size),int(img.shape[0]*size))))
 
-cap = cv2.VideoCapture(dir_path+"lane-r.mp4")
+cap = cv2.VideoCapture(dir_path+"lane-test17.mp4")
 _,frame_org = cap.read()
-# frame_org = cv2.imread(dir_path+"lane-test16.png")
+# frame_org = cv2.imread(dir_path+"test.jpg")
 lane = Lane(frame_org.shape[1], frame_org.shape[0])
 
 
 cv2.namedWindow('Hyper Parameters')
-cv2.createTrackbar('Binary Threshold 1',       'Hyper Parameters', 17, 100,    lambda x: None)
-cv2.createTrackbar('Binary Threshold 2',       'Hyper Parameters', 47, 100,    lambda x: None)
+cv2.createTrackbar('Binary Threshold 1',       'Hyper Parameters', 37, 100,    lambda x: None)
+cv2.createTrackbar('Binary Threshold 2',       'Hyper Parameters', 74, 100,    lambda x: None)
 cv2.createTrackbar('Canny Threshold',        'Hyper Parameters', 0,  200,    lambda x: None)
-cv2.createTrackbar('Y-Scale',                'Hyper Parameters', 42,  100,    lambda x: None)
-cv2.createTrackbar('X-Scale',                'Hyper Parameters', 6,  100,    lambda x: None)
+cv2.createTrackbar('Y-Scale',                'Hyper Parameters', 53,  100,    lambda x: None)
+cv2.createTrackbar('X-Scale',                'Hyper Parameters', 0,  100,    lambda x: None)
 cv2.createTrackbar('Warp Cut',               'Hyper Parameters', 35,  100,    lambda x: None)
 cv2.createTrackbar('Minimum STD',            'Hyper Parameters', 16,  100,    lambda x: None)
 cv2.createTrackbar('Minimum Lane Pts',       'Hyper Parameters', 20, 1000,   lambda x: None)
@@ -713,6 +795,10 @@ cv2.createTrackbar('Distance between Lanes', 'Hyper Parameters', 122,   160,   l
 cv2.createTrackbar('Horizontal Gradient Range:', 'Hyper Parameters', 20, 200,   lambda x: None)
 cv2.createTrackbar('Horizontal Stroke:', 'Hyper Parameters', 4, 50,   lambda x: None)
 cv2.createTrackbar('MorphologyEx Kernel Size:', 'Hyper Parameters', 0, 10,   lambda x: None)
+cv2.createTrackbar('Min thresh', 'Hyper Parameters', 25, 200,   lambda x: None)
+cv2.createTrackbar('Min length', 'Hyper Parameters', 0, 100,   lambda x: None)
+cv2.createTrackbar('Max Gap', 'Hyper Parameters', 0, 100,   lambda x: None)
+
 
 
 
@@ -725,7 +811,7 @@ while True:
     lane.set_warp_cut(cv2.getTrackbarPos('Warp Cut', 'Hyper Parameters')/100)
 
     _,frame_org = cap.read()
-    # frame_org = cv2.imread(dir_path+"lane-test16.png")
+    # frame_org = cv2.imread(dir_path+"test.jpg")
     show_image('Original Frame',lane.get_roi(frame_org))
 
     frame = lane.set_gray(frame_org)
@@ -735,175 +821,96 @@ while True:
 
     frame = lane.bin_thresh(frame,p=odd_val,c=cv2.getTrackbarPos('Binary Threshold 1','Hyper Parameters'))
     frame = lane.block_front(frame)
-    show_image('Block front',frame)
+    # show_image('Block front',frame)
 
     warped_frame = lane.get_roi(frame)
-    warped_frame = lane.transform(warped_frame,lane.M)
-    
     kernel_size = cv2.getTrackbarPos('MorphologyEx Kernel Size:','Hyper Parameters')
     if kernel_size %2 == 0: kernel_size += 1
 
     warped_frame = lane.denoise(warped_frame,kernel_size)
-    
-    # show_image('Warped Frame',cv2.line(warped_frame,(lane.width//2,0),(lane.width//2,lane.height),(255,255,255),3))
 
     frame2 = frame_org.copy()
-    frame2 = lane.transform(frame2, lane.M)
-    frame2 = cv2.rotate(frame2,cv2.ROTATE_90_CLOCKWISE)
     
-
-    warped_frame = lane.remove_horizontal(warped_frame,
-                                        cv2.getTrackbarPos('Horizontal Gradient Range:', 'Hyper Parameters')/100,
-                                        cv2.getTrackbarPos('Horizontal Stroke:', 'Hyper Parameters'))
-
-    show_image('Warped Frame',warped_frame)
     canny_edges = lane.canny_edge(warped_frame, param1=cv2.getTrackbarPos('Canny Threshold','Hyper Parameters'), param2=200)
+    show_image('!',canny_edges)
+    # lines = lane.detect_line_segments(canny_edges)
 
-    #Rotate Image
-    rotated_canny_edges = cv2.rotate(canny_edges, cv2.ROTATE_90_CLOCKWISE)
+
+    min_threshold = cv2.getTrackbarPos('Min thresh','Hyper Parameters')
+    min_line = cv2.getTrackbarPos('Min length','Hyper Parameters')
+    max_gap = cv2.getTrackbarPos('Max gap','Hyper Parameters')
+
+    lines = cv2.HoughLinesP(canny_edges, 1, np.pi/180, min_threshold, 
+                                    np.array([]), minLineLength=min_line, maxLineGap=max_gap)
     
-    left,right = lane.get_lanes(rotated_canny_edges)
-    # lane.get_lanes_dbscan(rotated_canny_edges)
+    lines2 = []
+    # lines = cv2.HoughLines(canny_edges, 1, np.pi / 180, min_threshold)
+    # print(lines)
+    if lines is not None:
+        for l in lines:
+            pt1 = (l[0][0],l[0][1])
+            pt2 = (l[0][2],l[0][3])
+            
+            if (pt1[0]-pt2[0]) != 0:
+                m = (pt1[1]-pt2[1])/(pt1[0]-pt2[0])
 
-    left_f, right_f = [],[]
-    left_curve,right_curve = [],[]
+                if not (-0.4 < m < 0.4):
+                    lines2.append(l)
+                    cv2.line(frame2, pt1, pt2, (0,0,255), 3, cv2.LINE_AA)
+                # if  1 < abs(m) < 4:
 
-    # plt.scatter([x for (x,y) in left],[y for (x,y) in left])
-    # plt.scatter([x for (x,y) in right],[y for (x,y) in right])
-    # plt.show()
 
-    try:
+    # if lines is not None:
+    #     for l in lines:
+    #         rho = l[0][0]
+    #         theta = l[0][1]
+    #         a = math.cos(theta)
+    #         b = math.sin(theta)
+    #         x0 = a * rho
+    #         y0 = b * rho
+    #         pt1 = (int(x0 + 1000*(-b)), int(y0 + 1000*(a)))
+    #         pt2 = (int(x0 - 1000*(-b)), int(y0 - 1000*(a)))
 
-        std_dev = cv2.getTrackbarPos('Minimum STD','Hyper Parameters')/10
+    #         lines2.append([pt1[0],pt1[1],pt2[0],pt2[1]])
 
-        if left:
-            left_f = lane.filter_points(left,std_dev)
-            left_curve = lane.fit_curve(left_f)
+    # print(lines2)
+    lines = lines2
                 
-        if right:
-            right_f = lane.filter_points(right,std_dev)
-            right_curve = lane.fit_curve(right_f)
-          
 
-        if lane.lanes_overlap(left_f, right_f) == True:
-            #The detected lanes are incorrect
-            #Calculate radius of curvature of all points
-            #Use radius to calculate angle of steering
+    # show_image('?',frame2)
+    lanes = lane.average_slope_intercept(frame, lines)
 
-            all_pts = left_f + right_f
-            c = lane.fit_curve(all_pts)
-            radius, dir = lane.lane_curv(c)
-            radius *= 10e-7
+    frame2 = lane.display_lines(frame2, lanes)
 
-            # print(["RIGHT","LEFT"][dir])
-            # print(f'Radius: {radius}')
-
-
-            #These types of l_dist and r_dist will invoke a steering to the left or right in the CommandGeneratorProcess
-            if dir: l_dist,r_dist = 100,30 #LEFT
-            else:   l_dist,r_dist = 30,100 #RIGHT
-
-            print(f'Left: {l_dist}')
-            print(f'Right: {r_dist}')
+    if len(lanes) == 2:
+        _, _, left_x2, _ = lanes[0][0]
+        _, _, right_x2, _ = lanes[1][0]
+        mid = int(lane.width / 2)
+        x_offset = (left_x2 + right_x2) / 2 - mid
+        y_offset = int(lane.height / 2)
+    elif len(lanes) == 1:
+        x1, _, x2, _ = lanes[0][0]
+        x_offset = x2 - x1
+        y_offset = int(lane.height / 2)
 
 
-            frame2 = lane.draw_curve(frame2, c, all_pts)
+    angle_to_mid_radian = math.atan(x_offset / y_offset)  # angle (in radian) to center vertical line
+    angle_to_mid_deg = int(angle_to_mid_radian * 180.0 / math.pi)  # angle (in degrees) to center vertical line
+    steering_angle = angle_to_mid_deg + 90  # this is the steering angle needed by picar front wheel
 
-        else:
-
-            if len(left_curve):
-                curve1, dir1 = lane.lane_curv(left_curve)
-                frame2 = lane.draw_curve(frame2, left_curve,  left_f)
-            if len(right_curve):
-                curve2, dir2 = lane.lane_curv(right_curve)
-                frame2 = lane.draw_curve(frame2, right_curve, right_f)
-            else:
-                #No lanes were detected
-                #Do something?
-                pass
+    print(angle_to_mid_deg)
 
 
-            l_dist, r_dist = lane.lane_offset(left_f,right_f)
 
-            min_dist, max_dist = 30,100
-            if l_dist and r_dist:
-                if l_dist > max_dist: l_dist = max_dist
-                if r_dist > max_dist: r_dist = max_dist
-
-                if l_dist < min_dist: l_dist = min_dist
-                if r_dist < min_dist: r_dist = min_dist
-            
-            elif l_dist and not r_dist:
-                if l_dist > max_dist: l_dist = max_dist
-                if l_dist < min_dist: l_dist = min_dist
-                r_dist = max_dist
-            elif r_dist and not l_dist:
-                if r_dist > max_dist: r_dist = max_dist
-                if r_dist < min_dist: r_dist = min_dist
-                l_dist = max_dist
-
-
-            print(f'Left: {l_dist}')
-            print(f'Right: {r_dist}')
-
-
-        # if int(time.time()*32) % 2 == 0:
-        #     if curve/100000000 < 200:
-        #         print(curve/100000000)
-        #         if curve1: print('Curve1: '+ ['RIGHT','LEFT'][dir1])
-        #         if curve1: print('Curve2: '+ ['RIGHT','LEFT'][dir2])
-        #     else: print(curve/100000000)
-            
-    except Exception as e: print(str(e))
     
-
-    #Show frame
-    frame2 = cv2.rotate(frame2,cv2.ROTATE_90_COUNTERCLOCKWISE)
-    # show_image('Warped Output Frame',frame2)
     
-    cv2.line(frame2, (lane.center, 0),(lane.center, lane.height), (0, 255, 0), 1) #Middle Point
-    
-    frame2 = lane.transform(frame2, lane.Minv)
+        
     show_image('Output Frame',frame2)
     
     if cv2.waitKey(1) & 0xFF == ord('q'): 
         cv2.destroyAllWindows()
         break
     
-
-
-
-
-
-# fig, axs = plt.subplots(2)
-# axs[0].scatter(top_ptsX,top_ptsY)
-# t = np.arange(min(top_ptsX),max(top_ptsX),1)
-# axs[1].plot(t,fl(t))
-
-# plt.show()
-
-
-
-
-
-# frame2 = lane.transform(frame2, lane.Minv)
-# cv2.imshow('canny_edges', frame2)
-
-        
-
-# plt.xlim([0,lane.width])
-# # plt.ylim([0,-lane.width])
-# plt.scatter(data[0],data[1])
-# plt.show()
-
-
-# z = np.polyfit(data[0], data[1], 5)
-# f = np.poly1d(z)
-# t = np.arange(0, canny_edges.shape[1], 1)
-# plt.plot(t,f(t))
-# plt.show()
-
-
 
 
 
